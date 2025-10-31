@@ -26,6 +26,9 @@ rec = KaldiRecognizer(model, 16000)
 q = queue.Queue()
 stop_flag = threading.Event()
 
+# In-memory text storage (persists even when popup closed)
+text_buffers = {lang: "" for lang in ["zh"] + list(TARGET_LANGS.keys())}
+
 def audio_callback(indata, frames, time, status):
     q.put(bytes(indata))
 
@@ -52,7 +55,7 @@ def listen_loop():
                 result = json.loads(rec.Result())
                 text = result.get("text", "").strip()
                 if text:
-                    update_window("zh", text)
+                    update_text("zh", text)
                     translate_text(text)
 
 # ---- TRANSLATION LOGIC ----
@@ -71,30 +74,31 @@ def _translate_task(text):
             response = requests.post(LIBRE_URL, data=payload, timeout=10)
             if response.ok:
                 translated = response.json().get("translatedText", "")
-                update_window(lang_code, translated)
+                update_text(lang_code, translated)
             else:
-                update_window(lang_code, f"❌ Error ({response.status_code})")
+                update_text(lang_code, f"❌ Error ({response.status_code})")
         except Exception as e:
-            update_window(lang_code, f"⚠️ {e}")
+            update_text(lang_code, f"⚠️ {e}")
 
-# ---- GUI LOGIC ----
-def update_window(lang_code, message):
-    text_widget = windows[lang_code]["text"]
-    text_widget.insert(tk.END, f"{message}\n\n")
-    text_widget.see(tk.END)
+# ---- TEXT HANDLING ----
+def update_text(lang_code, message):
+    global text_buffers
+    text_buffers[lang_code] += f"{message}\n\n"
 
-def log_message(msg):
-    main_log.insert(tk.END, msg)
-    main_log.see(tk.END)
+    # If window for this language is open, update its display
+    if lang_code in open_windows:
+        win = open_windows[lang_code]["text"]
+        win.insert(tk.END, f"{message}\n\n")
+        win.see(tk.END)
 
 # ---- SAVE TRANSCRIPT ----
 def save_transcript():
     combined = []
     combined.append("🈶 Chinese Transcript:\n")
-    combined.append(windows["zh"]["text"].get("1.0", tk.END).strip() + "\n\n")
+    combined.append(text_buffers["zh"].strip() + "\n\n")
     for code, name in TARGET_LANGS.items():
         combined.append(f"🌐 {name} Translation:\n")
-        combined.append(windows[code]["text"].get("1.0", tk.END).strip() + "\n\n")
+        combined.append(text_buffers[code].strip() + "\n\n")
 
     content = "\n".join(combined).strip()
     if not content:
@@ -112,61 +116,96 @@ def save_transcript():
             f.write(content)
         messagebox.showinfo("Saved", f"Transcript saved successfully:\n{file_path}")
 
-# ---- WINDOW CREATION ----
-def create_window(title, color, position):
+# ---- POPUP LOGIC ----
+open_windows = {}
+
+def toggle_window(lang_code, title):
+    """Opens or closes a language window on button press."""
+    if lang_code in open_windows:
+        # Close it
+        open_windows[lang_code]["window"].destroy()
+        del open_windows[lang_code]
+        log_message(f"❌ Closed {title} window.\n")
+        return
+
+    # Otherwise create it
     win = tk.Toplevel(root)
     win.title(title)
-    win.geometry(f"400x400+{position[0]}+{position[1]}")
+    win.geometry("400x400+100+100")
     win.configure(bg="#f4f4f4")
 
-    label = tk.Label(win, text=title, font=("Arial", 14, "bold"), bg="#f4f4f4", fg=color)
+    label = tk.Label(win, text=title, font=("Arial", 14, "bold"), bg="#f4f4f4")
     label.pack(pady=5)
 
-    text = ScrolledText(win, wrap=tk.WORD, font=("Consolas", 11))
-    text.pack(fill="both", expand=True, padx=10, pady=10)
-    return {"window": win, "text": text}
+    text_area = ScrolledText(win, wrap=tk.WORD, font=("Consolas", 11))
+    text_area.pack(fill="both", expand=True, padx=10, pady=10)
+
+    # Load previous content if exists
+    if lang_code in text_buffers:
+        text_area.insert(tk.END, text_buffers[lang_code])
+        text_area.see(tk.END)
+
+    open_windows[lang_code] = {"window": win, "text": text_area}
+
+    # Handle when user manually closes window (X button)
+    def on_close():
+        if lang_code in open_windows:
+            del open_windows[lang_code]
+        win.destroy()
+        log_message(f"❌ Closed {title} window.\n")
+
+    win.protocol("WM_DELETE_WINDOW", on_close)
+    log_message(f"🪟 Opened {title} window.\n")
 
 # ---- MAIN CONTROL WINDOW ----
 root = tk.Tk()
 root.title("🎧 Chinese → Multi-language Translator (Main Control)")
-root.geometry("500x400")
+root.geometry("600x600")
 
 control_frame = tk.Frame(root, bg="#f4f4f4")
 control_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-main_log = ScrolledText(control_frame, wrap=tk.WORD, font=("Consolas", 11), height=10)
+main_log = ScrolledText(control_frame, wrap=tk.WORD, font=("Consolas", 11), height=15)
 main_log.pack(fill="both", expand=True, padx=10, pady=10)
 
 btn_frame = tk.Frame(root, bg="#f4f4f4")
 btn_frame.pack(pady=10)
 
-start_btn = tk.Button(btn_frame, text="🎧 Start Listening", font=("Arial", 14, "bold"),
+start_btn = tk.Button(btn_frame, text="🎧 Start Listening", font=("Arial", 13, "bold"),
                       bg="#4CAF50", fg="white", relief="raised",
                       command=recognize_and_translate)
 start_btn.pack(side=tk.LEFT, padx=10)
 
-stop_btn = tk.Button(btn_frame, text="⏹ Stop", font=("Arial", 14, "bold"),
+stop_btn = tk.Button(btn_frame, text="⏹ Stop", font=("Arial", 13, "bold"),
                      bg="#f44336", fg="white", relief="raised",
                      state=tk.DISABLED, command=stop_listening)
 stop_btn.pack(side=tk.LEFT, padx=10)
 
-save_btn = tk.Button(btn_frame, text="💾 Save Transcript", font=("Arial", 14, "bold"),
+save_btn = tk.Button(btn_frame, text="💾 Save Transcript", font=("Arial", 13, "bold"),
                      bg="#2196F3", fg="white", relief="raised",
                      command=save_transcript)
 save_btn.pack(side=tk.LEFT, padx=10)
 
-# ---- CREATE TRANSLATION WINDOWS ----
-windows = {}
-colors = ["#333", "#007BFF", "#28A745", "#FFC107", "#9C27B0", "#FF5722"]
-positions = [(50, 100), (500, 100), (950, 100), (50, 550), (500, 550), (950, 550)]
+# ---- LANGUAGE WINDOW BUTTONS ----
+lang_frame = tk.LabelFrame(root, text="🌐 Open / Close Language Windows", font=("Arial", 12, "bold"), bg="#f4f4f4")
+lang_frame.pack(fill="x", padx=10, pady=10)
 
-# Main (Chinese) window
-windows["zh"] = create_window("🈶 Chinese (Recognized)", "#333", positions[0])
+# Add Chinese first
+tk.Button(lang_frame, text="🈶 Chinese", font=("Arial", 12),
+          bg="#E0E0E0", relief="raised",
+          command=lambda: toggle_window("zh", "Chinese (Recognized)")).pack(fill="x", padx=10, pady=3)
 
-# Translation windows
-for (code, name), pos, color in zip(TARGET_LANGS.items(), positions[1:], colors[1:]):
-    windows[code] = create_window(f"{name}", color, pos)
+# Then all translations
+for code, name in TARGET_LANGS.items():
+    tk.Button(lang_frame, text=f"🌐 {name}", font=("Arial", 12),
+              bg="#E0E0E0", relief="raised",
+              command=lambda c=code, n=name: toggle_window(c, n)).pack(fill="x", padx=10, pady=3)
 
-log_message("✅ Ready.\nClick '🎧 Start Listening' and start speaking Chinese...\n")
+# ---- LOG MESSAGE HELPER ----
+def log_message(msg):
+    main_log.insert(tk.END, msg)
+    main_log.see(tk.END)
+
+log_message("✅ Ready.\nClick '🎧 Start Listening' and open language windows as needed.\n")
 
 root.mainloop()
